@@ -2,13 +2,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { usePreviewState } from '@/features/preview-runtime/model/usePreviewState';
 import { useSelection } from '@/features/selection/model/useSelection';
-import { drawOutline } from '../lib/drawing';
+import { drawOutline, drawGuideLine, drawGuideLabel } from '../lib/drawing';
 import { getBoxRelativeTo } from '../lib/measure';
 import { resizeCanvasToDisplaySize } from '../lib/geometry';
 import { getClickableTypes } from '@/entities/components/api/getPalette';
+import { computeSectionGapGuides } from '../lib/guides';
 
 export default function CanvasLayer() {
-  const wrapperRef = useRef<HTMLDivElement>(null); // ★ fixed overlay wrapper
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef  = useRef<HTMLCanvasElement>(null);
   const anchors    = usePreviewState(s => s.anchors);
   const selected   = useSelection(s => s.selected);
@@ -17,7 +18,7 @@ export default function CanvasLayer() {
 
   useEffect(() => { getClickableTypes().then(setAllowed); }, []);
 
-  // 중앙 스크롤 컨테이너의 현재 뷰포트 사각형에 오버레이 고정
+  // overlay 위치/크기 동기화 (viewport fixed)
   useEffect(() => {
     const scrollEl = document.getElementById('preview-scroll') as HTMLElement | null;
     if (!scrollEl || !wrapperRef.current || !canvasRef.current) return;
@@ -25,9 +26,8 @@ export default function CanvasLayer() {
     const wrapper = wrapperRef.current!;
     const canvas  = canvasRef.current!;
 
-    const syncOverlayRect = () => {
-      const rect = scrollEl.getBoundingClientRect(); // 뷰포트 기준
-      // wrapper를 뷰포트에 고정하고, 중앙 컨테이너 영역만 덮게 위치/크기 설정
+    const syncRect = () => {
+      const rect = scrollEl.getBoundingClientRect();
       wrapper.style.position = 'fixed';
       wrapper.style.left = `${rect.left}px`;
       wrapper.style.top  = `${rect.top}px`;
@@ -41,17 +41,15 @@ export default function CanvasLayer() {
       resizeCanvasToDisplaySize(canvas);
     };
 
-    const ro = new ResizeObserver(syncOverlayRect);
+    const ro = new ResizeObserver(syncRect);
     ro.observe(scrollEl);
 
-    // 스크롤/리사이즈 시 위치 갱신
-    const onScroll = () => syncOverlayRect();
-    const onResize = () => syncOverlayRect();
+    const onScroll = () => syncRect();
+    const onResize = () => syncRect();
     window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('resize', onResize);
 
-    // 초기 1회
-    syncOverlayRect();
+    syncRect();
 
     return () => {
       ro.disconnect();
@@ -60,7 +58,7 @@ export default function CanvasLayer() {
     };
   }, []);
 
-  // 그리기 루프 (wrapper는 뷰포트 고정이므로 relative 기준으로 그대로 그리면 됨)
+  // draw loop: 선택 아웃라인 + 섹션 간 보조선/라벨
   useEffect(() => {
     const wrapper = wrapperRef.current;
     const canvas  = canvasRef.current;
@@ -72,6 +70,16 @@ export default function CanvasLayer() {
       resizeCanvasToDisplaySize(canvas);
       ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
 
+      // 1) 섹션 사이 보조선
+      const guides = computeSectionGapGuides(anchors, wrapper);
+      for (const g of guides) {
+        drawGuideLine(ctx, g.x1, g.x2, g.y);
+        // 라벨은 중앙 근처에
+        const cx = g.x1 + (g.x2 - g.x1) / 2 - 24;
+        drawGuideLabel(ctx, `${Math.round(g.gap)}px`, Math.max(8, cx), g.y);
+      }
+
+      // 2) 선택 아웃라인
       if (selected && anchors[selected]) {
         const b = getBoxRelativeTo(anchors[selected], wrapper);
         drawOutline(ctx, b);
@@ -83,7 +91,7 @@ export default function CanvasLayer() {
     return () => cancelAnimationFrame(raf);
   }, [anchors, selected]);
 
-  // 클릭 → 가장 가까운 [data-anch] → 허용 타입만 선택
+  // 클릭 처리 (closest + clickable 타입 필터)
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
